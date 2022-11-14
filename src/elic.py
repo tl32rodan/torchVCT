@@ -9,6 +9,12 @@ from compressai.layers import AttentionBlock as SimpleAttention
 from compressai.models.utils import conv, deconv
 
 
+def conv3x3(in_channels, out_channels):
+    return conv(in_channels, out_channels, 3, 1)
+
+def conv1x1(in_channels, out_channels):
+    return conv(in_channels, out_channels, 3, 1)
+
 class ResidualBlock(nn.Module):
     """Simple residual unit.
 
@@ -17,8 +23,9 @@ class ResidualBlock(nn.Module):
 
     """
 
-    def __init__(self, N=64):
+    def __init__(self, N = 64):
         super().__init__()
+
         self.conv = nn.Sequential(
             conv1x1(N, N // 2),
             nn.ReLU(inplace=True),
@@ -54,39 +61,39 @@ class ElicAnalysis(nn.Module):
                  input_channels = None,
                  output_channels = None,
                  **kwargs):
-    super().__init__(**kwargs)
-    if len(channels) != 4:
-        raise ValueError(f"ELIC uses 4 conv layers (not {channels}).")
-    if input_channels) is None:
-        raise ValueError(f"input_channels should be specified.")
-    if output_channels is not None and output_channels != channels[-1]:
-        raise ValueError("output_channels specified but does not match channels: "
-                       f"{output_channels} vs. {channels}")
+        super().__init__(**kwargs)
+        if len(channels) != 4:
+            raise ValueError(f"ELIC uses 4 conv layers (not {channels}).")
+        if input_channels) is None:
+            raise ValueError(f"input_channels should be specified.")
+        if output_channels is not None and output_channels != channels[-1]:
+            raise ValueError("output_channels specified but does not match channels: "
+                           f"{output_channels} vs. {channels}")
 
-    self._output_depth = channels[-1]
+        self._output_depth = channels[-1]
 
-    # Keep activation separate from conv layer for clarity and symmetry.
-    conv = functools.partial(
-        build_conv, kernel_size=5, strides=2, act=None, up_or_down="down")
+        # Keep activation separate from conv layer for clarity and symmetry.
+        conv = functools.partial(
+            build_conv, kernel_size=5, strides=2, act=None, up_or_down="down")
 
-    convs = [conv(input_channels=cin, output_channels=cout) for cin, cout in zip([input_channels] + channels[:-1], channels)]
+        convs = [conv(input_channels=cin, output_channels=cout) for cin, cout in zip([input_channels]+channels[:-1], channels)]
 
-    def build_act(N):
-        return [ResidualBlock(N) for _ in range(num_residual_blocks)]
+        def build_act(N):
+            return [ResidualBlock(N) for _ in range(num_residual_blocks)]
 
-    blocks = [
-        convs[0],
-        *build_act(N=channels[0]),
-        convs[1],
-        *build_act(N=channels[1]),
-        SimpleAttention(),
-        convs[2],
-        *build_act(N=channels[2]),
-        convs[3],
-        SimpleAttention(),
-    ]
-    blocks = list(filter(None, blocks))  # remove None elements
-    self._transform = nn.Sequential(blocks)
+        blocks = [
+            convs[0],
+            *build_act(N=channels[0]),
+            convs[1],
+            *build_act(N=channels[1]),
+            SimpleAttention(),
+            convs[2],
+            *build_act(N=channels[2]),
+            convs[3],
+            SimpleAttention(),
+        ]
+        blocks = list(filter(None, blocks))  # remove None elements
+        self._transform = nn.Sequential(blocks)
 
     def forward(self, x, training = None):
         del training
@@ -114,40 +121,40 @@ class ElicSynthesis(nn.Module):
                  input_channels = None,
                  output_channels = None,
                  **kwargs):
-    super().__init__(**kwargs)
-    if input_channels) is None:
-        raise ValueError(f"input_channels should be specified.")
-    if len(channels) != 4:
-        raise ValueError(f"ELIC uses 4 conv layers (not {channels}).")
-    if output_channels is not None and output_channels != channels[-1]:
-        raise ValueError("output_channels specified but does not match channels: "
-                       f"{output_channels} vs. {channels}")
+        super().__init__(**kwargs)
+        if input_channels) is None:
+            raise ValueError(f"input_channels should be specified.")
+        if len(channels) != 4:
+            raise ValueError(f"ELIC uses 4 conv layers (not {channels}).")
+        if output_channels is not None and output_channels != channels[-1]:
+            raise ValueError("output_channels specified but does not match channels: "
+                           f"{output_channels} vs. {channels}")
 
-    self._output_depth = channels[-1]
+        self._output_depth = channels[-1]
 
-    # Keep activation separate from conv layer for clarity and because
-    # second conv is followed by attention, not an activation.
-    conv = functools.partial(
-        build_conv, kernel_size=5, strides=2, act=None, up_or_down="up")
+        # Keep activation separate from conv layer for clarity and because
+        # second conv is followed by attention, not an activation.
+        conv = functools.partial(
+            build_conv, kernel_size=5, strides=2, act=None, up_or_down="up")
 
-    convs = [conv(input_channels=cin, output_channels=cout) for cin, cout in zip([input_channels] + channels[:-1], channels)]
+        convs = [conv(input_channels=cin, output_channels=cout) for cin, cout in zip([input_channels] + channels[:-1], channels)]
 
-    def build_act(N):
-        return [ResidualBlock(N) for _ in range(num_residual_blocks)]
+        def build_act(N):
+            return [ResidualBlock(N) for _ in range(num_residual_blocks)]
 
-    blocks = [
-        SimpleAttention(),
-        convs[0],
-        *build_act(N=channels[0]),
-        convs[1],
-        SimpleAttention(),
-        *build_act(N=channels[1]),
-        convs[2],
-        *build_act(N=channels[2]),
-        convs[3],
-    ]
-    blocks = list(filter(None, blocks))  # remove None elements
-    self._transform = torch.Sequential(blocks)
+        blocks = [
+            SimpleAttention(),
+            convs[0],
+            *build_act(N=channels[0]),
+            convs[1],
+            SimpleAttention(),
+            *build_act(N=channels[1]),
+            convs[2],
+            *build_act(N=channels[2]),
+            convs[3],
+        ]
+        blocks = list(filter(None, blocks))  # remove None elements
+        self._transform = torch.Sequential(blocks)
 
     def forward(self, x, training = None):
         del training  # Unused.
