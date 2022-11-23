@@ -31,7 +31,7 @@ def _reflect_pad(tensor, target_factor):
     width_padded = math.ceil(width / target_factor) * target_factor
     return F.pad(
         tensor,
-        (0, 0, 0, height_padded - height, 0, width_padded - width),
+        (0, 0, 0, width_padded - width, 0, height_padded - height),
         mode="reflect")
 
 def window_partition(features, window_size, pad = True,):
@@ -48,7 +48,7 @@ def window_partition(features, window_size, pad = True,):
     ValueError: If the feature map sizes are not divisible by window sizes.
     """
     b, h, w, c = features.shape
-
+    # print("1. ",features.shape)
     if h % window_size != 0 or w % window_size != 0:
         if not pad:
             raise ValueError(f"Feature map sizes {(h, w)} "
@@ -59,6 +59,7 @@ def window_partition(features, window_size, pad = True,):
         assert features is not None  # pytype
         _, h, w, _ = features.shape
 
+    # print("2. ",features.shape)
     features = features.reshape(b, h // window_size, window_size, w // window_size, window_size, c)
     features = torch.einsum("bhiwjc->bhwijc", features)
     # features = torch.permute(features, (0, 1, 3, 2, 4, 5)) # check
@@ -127,7 +128,18 @@ def extract_patches_conv2d(image, size, stride = 1, padding = "SAME"):
     kernel = torch.eye(size * size * channels, dtype=image.dtype).reshape(size, size, channels, channels * size * size)
     # print(kernel)
     # print(kernel.shape)
-    return F.conv2d(image.permute(0, 3, 1, 2), kernel.permute(2, 3, 1, 0), stride=stride, padding=padding).permute(0, 2, 3, 1)# check
+    if padding == "same" and stride != 1:
+        # pad first then conv2d
+        # B, H, W, C = image.shape
+        # pad_h = H*stride - H
+        # pad_W = H*stride - W
+        image = torch.permute(image, (0, 3, 1, 2))
+        pad_row = size - 1
+        pad_col = size - 1
+        image = F.pad(image, (0, pad_row, 0, pad_col))
+        return F.conv2d(image, kernel.permute(3, 2, 0, 1), stride=stride).permute(0, 2, 3, 1)# check
+    else:
+        return F.conv2d(image.permute(0, 3, 1, 2), kernel.permute(3, 2, 0, 1), stride=stride, padding=padding).permute(0, 2, 3, 1)# check
 
 # def _has_gpu():
 #     """Returns true iff a TPU is available on the current machine."""

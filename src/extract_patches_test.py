@@ -42,22 +42,26 @@ def extract_patches_tf(image, size=2, stride=1, rate=1, padding= "SAME"):
 
     kernel_range_horizental = (size-1)*rate + 1 
     kernel_range_vertical = (size-1)*rate + 1 
+    pad_row = 0
+    pad_col = 0
     if padding == "SAME":
         # Do tensorflow "SAME" Padding 
         pad_row = kernel_range_horizental - 1
         pad_col = kernel_range_vertical - 1
         image = F.pad(image, (0, pad_row, 0, pad_col))
+        # print("padding ffijjf", pad_row, pad_col)
     elif padding == "VALID":
         pass
     else:
         raise NotImplementedError("some other padding format hasn't been check")
     
-    B, C, NH, NW = image.shape
-    # print(B, C, NH, NW)
-    H = NH - kernel_range_horizental + 1
-    W = NW - kernel_range_vertical + 1
+    H = (H + pad_col -rate*(kernel_range_vertical-1)-1)//stride + 1
+    W = (W + pad_row -rate*(kernel_range_horizental-1)-1)//stride + 1
+    print("kernel: ", kernel_range_vertical, kernel_range_horizental)
+    print("pad: ", pad_col, pad_row)
+    print(H, W)
     patches = F.unfold(image, kernel_size=(size,size), dilation=(rate,rate), stride=(stride,stride))
-    # print("1 ",patches.shape )
+    print("1 ",patches.shape )
     patches = patches.permute((0, 2, 1))
     # print("2 ",patches.shape )
     patches = patches.reshape((B, H, W, C, -1))
@@ -94,12 +98,18 @@ class ExtractPatchesTest(unittest.TestCase):
         image = torch.normal(mean=0, std=1, size=(2, 16, 16, 5))
         output = extract_patches.extract_patches_conv2d(image, size=size, stride=stride, padding=padding)
         expected = extract_patches_tf(image, size=size, stride=stride, padding=padding)
+        diff = output-expected
+        print("out", output.shape)
+        print("expect: ", expected.shape)
+        assert sum(sum(sum(sum(diff)))).item() < 1e-7, "error"
         # self.assertAllClose(output, expected)
         # raise "Latter check"
 
         if size == stride:
             print("========= Sub Test non_padding ========= (ExtractPatchesTest)")
             expected_non_overlapping = extract_patches.extract_patches_nonoverlapping(image, window_size=stride, pad=False)
+            diff = output-expected_non_overlapping
+            assert sum(sum(sum(sum(diff)))).item() < 1e-7, "error"
             # self.assertAllClose(output, expected_non_overlapping)
             # print(expected_non_overlapping.shape)
             # raise "Latter check"
@@ -127,25 +137,28 @@ class WindowPartitionTest(unittest.TestCase):
 if __name__ == "__main__":
     args = parse_args()
 
-    if args.ep:
-        import tensorflow as tf
-        image = tf.random.normal((2, args.img_h, args.img_w, 3))
-        ans1 = extract_patches_tf_old(image, size=args.patch, stride = args.stride, padding = "VALID")
-        print("original_tensor_format", ans1.shape)
+    for size in [1,2,3,4]:
+        for stride in [1,2]:
+            for padding in ["VALID", "SAME"]:
+                print("+++++++++++++++", size, stride, padding, "+++++++++++++++")
+                if args.ep:
+                    import tensorflow as tf
+                    image = tf.random.normal((2, args.img_h, args.img_w, 3))
+                    ans1 = extract_patches_tf_old(image, size=size, stride = stride, padding = padding)
+                    print("original_tensor_format", ans1.shape)
 
-        
-        t = tf.identity(image).numpy()
-        torch_image = torch.from_numpy(t)
+                    
+                    t = tf.identity(image).numpy()
+                    torch_image = torch.from_numpy(t)
 
-        ans2 = extract_patches_tf(torch_image,  size=args.patch, stride=args.stride, rate=1, padding = "VALID")
-        print("new_tensor_format", ans2.shape)
-        print("There differences: ",sum(sum(sum(sum(ans1-ans2)))))
+                    ans2 = extract_patches_tf(torch_image,  size=size, stride=stride, rate=1, padding = padding)
+                    print("new_tensor_format", ans2.shape)
+                    print("There differences: ",sum(sum(sum(sum(ans1-ans2)))))
 
-    windows_testbench = WindowPartitionTest()
-    windows_testbench.test_non_overlapping()
+                windows_testbench = WindowPartitionTest()
+                windows_testbench.test_non_overlapping()
 
-    extract_patch_testbench = ExtractPatchesTest()
-    extract_patch_testbench.test_extract_patches_conv2d(1, 1, "VALID")
-
+                extract_patch_testbench = ExtractPatchesTest()
+                a = extract_patch_testbench.test_extract_patches_conv2d(size, stride, padding)
     
 
