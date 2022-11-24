@@ -49,6 +49,7 @@ def extract_patches_tf(image, size=2, stride=1, rate=1, padding= "SAME"):
         pad_row = kernel_range_horizental - 1
         pad_col = kernel_range_vertical - 1
         image = F.pad(image, (0, pad_row, 0, pad_col))
+        # print("image",image[0,:,:,0])
         # print("padding ffijjf", pad_row, pad_col)
     elif padding == "VALID":
         pass
@@ -99,9 +100,11 @@ class ExtractPatchesTest(unittest.TestCase):
         output = extract_patches.extract_patches_conv2d(image, size=size, stride=stride, padding=padding)
         expected = extract_patches_tf(image, size=size, stride=stride, padding=padding)
         diff = output-expected
-        print("out", output.shape)
-        print("expect: ", expected.shape)
-        assert sum(sum(sum(sum(diff)))).item() < 1e-7, "error"
+        # print("out", output.shape)
+        # print("expect: ", expected.shape)
+        # print(output[0,:,:,0])
+        # print(expected[0,:,:,0])
+        assert sum(sum(sum(sum(diff)))).item() < 1e-5, f"error: {sum(sum(sum(sum(diff)))).item()}"
         # self.assertAllClose(output, expected)
         # raise "Latter check"
 
@@ -131,6 +134,7 @@ class WindowPartitionTest(unittest.TestCase):
         image = torch.normal(mean=0, std=1, size=(2, 14, 14, 4))
         patches = extract_patches.window_partition(image, 4, pad=True)
         unpatched = extract_patches.unwindow(patches, 4, unpad=(14, 14))
+        # print("AS",image.shape)
         assert sum(sum(sum(sum(image-unpatched)))).item() < 1e-7, "patch error"
 
 

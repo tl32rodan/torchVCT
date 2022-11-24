@@ -137,6 +137,7 @@ def extract_patches_conv2d(image, size, stride = 1, padding = "SAME"):
         pad_row = size - 1
         pad_col = size - 1
         image = F.pad(image, (0, pad_row, 0, pad_col))
+        # print("inner image: ", image[0,:,:,0])
         return F.conv2d(image, kernel.permute(3, 2, 0, 1), stride=stride).permute(0, 2, 3, 1)# check
     else:
         return F.conv2d(image.permute(0, 3, 1, 2), kernel.permute(3, 2, 0, 1), stride=stride, padding=padding).permute(0, 2, 3, 1)# check
