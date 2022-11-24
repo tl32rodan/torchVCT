@@ -18,11 +18,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torch.cuda import amp
+from torch.optim.lr_scheduler import MultiplicativeLR
+
+from vct.src import elic
+from vct.src import entropy_model
 
 from compressai.entropy_models import GaussianConditional
 from compressai.layers import QReLU
 from compressai.registry import register_model
-
 from compressai.models.google import CompressionModel, get_scale_table
 from compressai.models.utils import (
     conv,
@@ -35,19 +38,19 @@ from compressai.models.utils import (
 
 Metrics = metric_collection.Metrics
 WithMetrics = metric_collection.WithMetrics
-Tensor = tf.Tensor
+Tensor = nn.Tensor
 
 
 def is_iframe(frame_index):
     return frame_index == 0
 
-#class Bottleneck(NamedTuple):
-#  """Bottleneck representing a single frame.."""
-#
-#  latent_q: tf.Tensor
-#  bits: tf.Tensor  # (B,)
-#
-#  entropy_model_features: Optional[tf.Tensor] = None
+class Bottleneck(NamedTuple):
+  """Bottleneck representing a single frame.."""
+
+  latent_q: nn.Tensor
+  bits: nn.Tensor  # (B,)
+
+  entropy_model_features: Optional[nn.Tensor] = None
 
 
 # Previous latents quantized, as well previous latents quantized and also
@@ -55,51 +58,39 @@ def is_iframe(frame_index):
 State = Tuple[entropy_model.PreviousLatent, Ellipsis]
 
 # We can have None if the model does not produce reconstructions.
-Image = tf.Tensor
+Image = nn.Tensor
 
 # Hardcoded schedules, in ratios (of steps) or of base values.
 HIGHER_LAMBDA_UNTIL = 0.15
 HIGHER_LAMBDA_FACTOR = 10.0
 
 
-class CompressionSchedule(schedule.KerasSchedule):
-    """LR Schedule for compression, with a drop at the end and warmup."""
-
+class CompressionSchedule(MultiplicativeLR):
     def __init__(
             self,
-            base_learning_rate,
+            optimizer,
             num_steps,
             warmup_until = 0.02,
             drop_after = 0.85,
             drop_factor = 0.1,
     ):
-    super().__init__(
-       base_value=base_learning_rate,
-       warmup_steps=int(warmup_until * num_steps),
-       vals=[1., drop_factor],
-       boundaries=[int(drop_after * num_steps)])
+    """LR Schedule for compression, with a drop at the end and warmup."""
+
+    self.num_steps = num_steps
+    self.drop_factor = drop_factor
+    self.warmup_steps = int(warmup_until * num_steps)
+    self.drop_after_steps = int(drop_after * num_steps)
+
+    def _lr_lambda(step):
+        if step < self.drop_after_steps:
+            return min(1., (step + 1) / self.warmup_steps)
+        else:
+            return (1. - self.drop_factor) * ((self.num_steps - step) / (num_steps - self.drop_after_steps)) + self.drop_factor
+            
+    super().__init__(optimizer=optimizer, lr_lambda=_lr_lambda)
 
 
-LearningRateSchedule = tf.keras.optimizers.schedules.LearningRateSchedule
-
-
-class _WrapAsWeightDecaySchedule(LearningRateSchedule):
-    """Wraps a learning rate schedule into a weight decay schedule."""
-  
-    # This class is needed because we want to multiply the weight decay factor
-    # for AdamW with the learning rate schedule. This only works for
-    # tfa_optimizers.AdamW if we have a subclass of `LearningRateSchedule`.
-  
-    def __init__(self, lr_schedule, weight_decay):
-        super().__init__()
-        self._lr_schedule = lr_schedule
-        self._weight_decay = weight_decay
-  
-    def __call__(self, step):
-        return self._weight_decay * self._lr_schedule(step)
-
-
-Cls = Callable[Ellipsis, tf.Module]
+Cls = Callable[Ellipsis, nn.Module]
 
 
 def build(cls, **kwargs):
@@ -155,7 +146,7 @@ class EncodeOut(NamedTuple):
 
 class NetworkOut(NamedTuple):
     reconstruction: Image
-    bits: tf.Tensor
+    bits: nn.Tensor
     frame_metrics: Metrics
 
 
@@ -163,39 +154,33 @@ def _make_optimizer_and_lr_schedule(
     schedules_num_steps,
     weight_decay = 0.03,
     learning_rate = 1e-4,
-    global_clipnorm = 1.0,
+    #global_clipnorm = 1.0,
 ):
   """Returns optimizer and learning rate schedule."""
 
-  lr_schedule = CompressionSchedule(
-          base_learning_rate=learning_rate,
-          num_steps=schedules_num_steps,
+  opt = torch.optim.AdamW(
+          learning_rate=learning_rate,
+          weight_decay=weight_decay,
+          #global_clipnorm=global_clipnorm,
+          betas=(0.9, 0.98),
+          eps=1e-9,
   )
-  opt = tfa_optimizers.AdamW(
-          learning_rate=lr_schedule,
-          # NOTE: We only implement the weight-decay variant where the factor
-          # multiplies the LR schedule.
-          # Need an instance of LearningRateSchedule, hence the wrap!
-          weight_decay=_WrapAsWeightDecaySchedule(lr_schedule, weight_decay),
-          global_clipnorm=global_clipnorm,
-          beta_1=0.9,
-          beta_2=0.98,
-          epsilon=1e-9,
+  lr_schedule = CompressionSchedule(
+          optimizer=opt,
+          num_steps=schedules_num_steps,
   )
   return opt, lr_schedule
 
 
-class ResidualBlock(tf.keras.layers.Layer):
+class ResidualBlock(nn.Module):
   """Standard residual block."""
 
-    def __init__(self, filters, kernel_size, activation = "relu"):
+    def __init__(self, in_channels, filters, kernel_size):
         super().__init__()
-        self._conv_1 = tf.keras.layers.Conv2D(
-            filters, kernel_size, padding="same")
-        self._act_1 = tf.keras.layers.LeakyReLU()
-        self._conv_2 = tf.keras.layers.Conv2D(
-            filters, kernel_size, padding="same")
-        self._act_2 = tf.keras.layers.LeakyReLU()
+        self._conv_1 = nn.Conv2D(in_channels, filters, kernel_size, padding=(kernel_size - 1) // 2, padding_mode="same")
+        self._act_1 = nn.LeakyReLU()
+        self._conv_2 = nn.Conv2D(filters, filters, kernel_size, padding=(kernel_size - 1) // 2, padding_mode="same")
+        self._act_2 = nn.LeakyReLU()
 
     def call(self, inputs):
         filtered_1 = self._act_1(self._conv_1(inputs))
@@ -203,53 +188,43 @@ class ResidualBlock(tf.keras.layers.Layer):
         return filtered_2 + inputs
 
 
-class Dequantizer(tf.Module):
+class Dequantizer(nn.Module):
   """Implements dequantization.
   We feed y' = y + f(z) to the synthesis transform,
   where y is the latent and z is transformer/entropy model features.
   """
 
-    def __init__(self,
-                   num_channels,
-                   d_model,
-                   name = "Dequantizer"):
+    def __init__(self, num_channels, d_model):
         """Instantiates dequantizer."""
-        super().__init__(name=name)
+        super().__init__()
         self._d_model = d_model
         self._num_channels = num_channels
-        with self.name_scope:
-          self._process = tf.keras.Sequential([
-              tf.keras.layers.Dense(num_channels),
-              tf.keras.layers.LeakyReLU(),
-              ResidualBlock(
-                  num_channels, kernel_size=3, activation="lrelu"),
-          ])
+        self._process = nn.Sequential([
+            nn.Linear(num_channels, num_channels),
+            nn.LeakyReLU(),
+            ResidualBlock(num_channels, num_channels, kernel_size=3),
+        ])
 
-  @tf.Module.with_name_scope
-    def __call__(self, *, latent_q,
-                   entropy_features):
+    def forward(self, latent_q, entropy_features):
         """Calculates y'."""
         if entropy_features is None:
           b, h, w, _ = latent_q.shape
-          entropy_features = tf.zeros((b, h, w, self._d_model), dtype=tf.float32)
+          entropy_features = torch.zeros((b, h, w, self._d_model), dtype=torch.float32)
         return latent_q + self._process(entropy_features)
 
 
-class PerChannelWeight(tf.Module):
+class PerChannelWeight(nn.Module):
     """Learns a weight per channel and broadcasts these.
     This is used to get fake previous frames to encode the first frame.
     """
 
-    def __init__(self,
-                   num_channels,
-                   name = None):
+    def __init__(self, num_channels):
         super().__init__(name=name)
-        self.weight = tf.Variable(
-            tf.random.uniform((num_channels,)), trainable=True, name="weight")
+        self.weight = nn.Parameter(torch.Tensor(num_channels,), requires_grad=True)
 
-    def __call__(self, latent_shape):
+    def forward(self, latent_shape):
         assert latent_shape[-1] == self.weight.shape[0]
-        return tf.ones(latent_shape, self.weight.dtype) * self.weight
+        return torch.ones(latent_shape, self.weight.dtype).to(self.weight.device) * self.weight
 
 
 def pad_tensor(
@@ -264,7 +239,7 @@ def pad_tensor(
     _, height, width, _ = tensor.shape
     height_padded = math.ceil(height / target_factor) * target_factor
     width_padded = math.ceil(width / target_factor) * target_factor
-    return tf.pad(tensor, [[0, 0], [0, height_padded - height],
+    return F.pad(tensor, [[0, 0], [0, height_padded - height],
                                [0, width_padded - width], [0, 0]], mode)
 
 
@@ -274,7 +249,7 @@ _TensorStructure = TypeVar("_TensorStructure")
 
 def _round_if_not_training(tensor, training):
     if not training:
-          return tf.round(tensor)
+          return torch.round(tensor)
     else:
           return tensor
   
@@ -293,27 +268,30 @@ def _mse_psnr(original, reconstruction,
     """
     # The images/reconstructions are in [0...1] range, but we scale them to
     # [0...255] before computing the MSE.
-    mse_per_batch = tf.reduce_mean(
-            tf.math.squared_difference(
-                _round_if_not_training(original * 255.0, training),
-                _round_if_not_training(reconstruction * 255.0, training)),
-            axis=(1, 2, 3))
-    mse = tf.reduce_mean(mse_per_batch)
-    psnr_factor = -10. / tf.math.log(10.)
-    psnr = tf.reduce_mean(psnr_factor * tf.math.log(mse_per_batch / (255.**2)))
+    mse_per_batch = torch.mean(
+                        F.mse_loss(
+                            _round_if_not_training(original * 255.0, training),
+                            _round_if_not_training(reconstruction * 255.0, training),
+                            reduction='none'
+                        ),
+                        dim=(1, 2, 3)
+                    )
+    mse = torch.mean(mse_per_batch)
+    psnr_factor = -10. / torch.log(10.)
+    psnr = torch.mean(psnr_factor * torch.log(mse_per_batch / (255.**2)))
     return mse, psnr
 
 
-def _iter_padded(
-        tensor_structures,
-        target_factor,
-        mode = "REFLECT",
-):
-  """Pad each tensor structure such that it is divisible by `target_factor`."""
-  pad = functools.partial(
-          pad_tensor, target_factor=target_factor, mode=mode)
-  for tensor_structure in tensor_structures:
-        yield tf.nest.map_structure(pad, tensor_structure)
+#def _iter_padded(
+#        tensor_structures,
+#        target_factor,
+#        mode = "REFLECT",
+#):
+#  """Pad each tensor structure such that it is divisible by `target_factor`."""
+#  pad = functools.partial(
+#          pad_tensor, target_factor=target_factor, mode=mode)
+#  for tensor_structure in tensor_structures:
+#        yield tf.nest.map_structure(pad, tensor_structure)
 
 
 def _spy_spatial_shape(
@@ -326,10 +304,10 @@ def _spy_spatial_shape(
   return spatial_shape, itertools.chain([head], it)
 
 
-class Model(tf.Module):
+class Model(nn.Module):
   """Encapsulates model + loss + optimizer + metrics.
   Attributes:
-        global_step: A (non-trainable) tf.Variable containing the global step.
+        global_step: A (non-trainable) nn.Parameter containing the global step.
   """
 
     def __init__(
@@ -383,7 +361,7 @@ class Model(tf.Module):
         self._dequantizer = Dequantizer(config.num_channels,
                                         self._entropy_model_pframe.d_model)
 
-  @property
+    @property
     def global_step(self):
         """Returns the global step variable."""
         return self._optimizer.iterations
