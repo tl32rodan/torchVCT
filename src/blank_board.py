@@ -167,8 +167,21 @@ if __name__ == "__main__":
     # # a = torch.normal(mean=(1. , 2.), std = (0.01, 0.03))
     # print(a)
     # print(a.shape)
-    model = LearnedPosition("test1", 3, 5)
-    a = model(torch.ones((1,3,5)))
-    print(list(model.named_parameters()))
+    # model = LearnedPosition("test1", 3, 5)
+    # a = model(torch.ones((1,3,5)))
+    # print(list(model.named_parameters()))
+    # shape = (1,2,3)
+    # N = 1
+    # for i in shape:
+    #     N *= i
+    # a = torch.ones((N, 5)).reshape(*shape, 5)
+    # print(a.shape)
+    dim = (64, 64)
+    dim = (1,) + tuple(dim)
+    print(dim)
+    N = 1
+    for i in dim:
+        N *= i
+    print(N)
 
 
