@@ -351,5 +351,5 @@ class EncoderSection(Transformer):
             drop_out=drop_out,
             name=name)
 
-    def __call__(self, latent, training):
-        return super().__call__(latent, None, training)
+    def forward(self, latent, training):
+        return super(latent, None, training)
